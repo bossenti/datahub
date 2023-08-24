@@ -266,7 +266,7 @@ class SchemaResolver(Closeable):
                 ).get_table_name()
 
         urn = make_dataset_urn_with_platform_instance(
-            platform=self.platform,
+            platform="athena",#self.platform,
             platform_instance=self.platform_instance,
             env=self.env,
             name=table_name,
@@ -728,6 +728,9 @@ def _sqlglot_lineage_inner(
         debug_info.column_error = e
         logger.debug(debug_info.column_error)
     except SqlUnderstandingError as e:
+        logger.debug(f"Failed to generate column-level lineage: {e}", exc_info=True)
+        debug_info.column_error = e
+    except AttributeError as e:
         logger.debug(f"Failed to generate column-level lineage: {e}", exc_info=True)
         debug_info.column_error = e
 

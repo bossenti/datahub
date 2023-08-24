@@ -6,6 +6,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 import pydantic
 from pyathena.common import BaseCursor
 from pyathena.model import AthenaTableMetadata
+from pyathena.sqlalchemy_athena import AthenaRestDialect
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine.reflection import Inspector
 
 from datahub.configuration.validate_field_rename import pydantic_renamed_field
@@ -29,6 +32,41 @@ from datahub.ingestion.source.sql.sql_utils import (
     gen_database_key,
 )
 
+logger = logging.getLogger(__name__)
+
+
+class CustomAthenaRestDialect(AthenaRestDialect):
+    """Custom definition of the Athena dialect.
+
+    Custom implementation that allows to extend/modify the behavior of the SQLalchemy
+    dialect that is used by PyAthena (which is the library that is used by DataHub
+    to extract metadata from Athena).
+    This dialect can then be used by the inspector (see get_inspectors()).
+
+    """
+
+    def get_view_definition(
+        self,
+        connection: Connection,
+        view_name: str,
+        schema: Optional[str] = ...,
+        **kw: Any,
+    ) -> Any:
+
+        if schema is None:
+            raise AttributeError("schema is required")
+
+        if view_name is None:
+            raise AttributeError("view_name is required")
+
+        query = f"""SHOW CREATE VIEW "{schema}"."{view_name}";"""
+
+        query_result = connection.execute(query)
+        statement_rows = [r for r in query_result]
+
+        view_statement = '\n'.join([row[0] for row in statement_rows])
+        return view_statement
+
 
 class AthenaConfig(SQLCommonConfig):
     scheme: str = "awsathena+rest"
@@ -41,7 +79,7 @@ class AthenaConfig(SQLCommonConfig):
     )
     database: Optional[str] = pydantic.Field(
         default=None,
-        description="The athena database to ingest from. If not set it will be autodetected",
+        description="The athena database to ingest from. If not set it will be auto-detected",
     )
     aws_region: str = pydantic.Field(
         description="Aws region where your Athena database is located"
@@ -69,7 +107,7 @@ class AthenaConfig(SQLCommonConfig):
 
     query_result_location: str = pydantic.Field(
         description="S3 path to the [query result bucket](https://docs.aws.amazon.com/athena/latest/ug/querying.html#query-results-specify-location) which should be used by AWS Athena to store results of the"
-        "queries executed by DataHub."
+                    "queries executed by DataHub."
     )
 
     # overwrite default behavior of SQLAlchemyConfing
@@ -128,6 +166,18 @@ class AthenaSource(SQLAlchemySource):
     def create(cls, config_dict, ctx):
         config = AthenaConfig.parse_obj(config_dict)
         return cls(config, ctx)
+
+    # overwrite this method to allow to specify the usage of a custom dialect
+    def get_inspectors(self) -> Iterable[Inspector]:
+        url = self.config.get_sql_alchemy_url()
+        logger.debug(f"sql_alchemy_url={url}")
+        engine = create_engine(url, **self.config.options)
+
+        # set custom dialect to be used by the inspector
+        engine.dialect = CustomAthenaRestDialect()
+        with engine.connect() as conn:
+            inspector = inspect(conn)
+            yield inspector
 
     def get_table_properties(
         self, inspector: Inspector, schema: str, table: str
